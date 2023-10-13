@@ -15,6 +15,13 @@
  */
 package com.github.shyiko.sme;
 
+import java.lang.reflect.Method;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Properties;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
 import org.apache.maven.AbstractMavenLifecycleParticipant;
 import org.apache.maven.MavenExecutionException;
 import org.apache.maven.execution.MavenSession;
@@ -31,24 +38,16 @@ import org.codehaus.plexus.context.Context;
 import org.codehaus.plexus.context.ContextException;
 import org.codehaus.plexus.personality.plexus.lifecycle.phase.Contextualizable;
 
-import java.lang.reflect.Method;
-import java.util.HashMap;
-import java.util.Map;
-import java.util.Properties;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
-
 /**
  * @author <a href="mailto:stanley.shyiko@gmail.com">Stanley Shyiko</a>
  */
 @Component(role = AbstractMavenLifecycleParticipant.class)
 public class ServersExtension extends AbstractMavenLifecycleParticipant implements Contextualizable {
 
-    private static final String SECURITY_DISPATCHER_CLASS_NAME =
-        "org.sonatype.plexus.components.sec.dispatcher.SecDispatcher";
+    private static final String SECURITY_DISPATCHER_CLASS_NAME = "org.sonatype.plexus.components.sec.dispatcher.SecDispatcher";
 
-    private static final String[] FIELDS = new String[]{"username", "password", "passphrase", "privateKey",
-        "filePermissions", "directoryPermissions"};
+    private static final String[] FIELDS = new String[] { "username", "password", "passphrase", "privateKey",
+            "filePermissions", "directoryPermissions" };
 
     private PlexusContainer container;
 
@@ -68,8 +67,8 @@ public class ServersExtension extends AbstractMavenLifecycleParticipant implemen
                 for (String field : FIELDS) {
                     String[] aliases = getAliases(serverId, field);
                     String fieldNameWithFirstLetterCapitalized = upperCaseFirstLetter(field);
-                    String fieldValue = (String) Server.class.
-                        getMethod("get" + fieldNameWithFirstLetterCapitalized).invoke(server);
+                    String fieldValue = (String) Server.class.getMethod("get" + fieldNameWithFirstLetterCapitalized)
+                                                             .invoke(server);
                     if (fieldValue != null) {
                         fieldValue = decryptInlinePasswords(fieldValue);
                     }
@@ -81,8 +80,8 @@ public class ServersExtension extends AbstractMavenLifecycleParticipant implemen
                         }
                     }
                     String resolvedValue = (String) expressionEvaluator.evaluate(fieldValue);
-                    Server.class.getMethod("set" + fieldNameWithFirstLetterCapitalized, new Class[]{String.class}).
-                        invoke(server, resolvedValue);
+                    Server.class.getMethod("set" + fieldNameWithFirstLetterCapitalized, new Class[] { String.class })
+                                .invoke(server, resolvedValue);
                     if (resolvedValue != null) {
                         for (String alias : aliases) {
                             properties.put(alias, resolvedValue);
@@ -111,8 +110,9 @@ public class ServersExtension extends AbstractMavenLifecycleParticipant implemen
 
     private String decryptPassword(String password) {
         try {
-            Class<?> securityDispatcherClass = container.getClass().getClassLoader()
-                .loadClass(SECURITY_DISPATCHER_CLASS_NAME);
+            Class<?> securityDispatcherClass = container.getClass()
+                                                        .getClassLoader()
+                                                        .loadClass(SECURITY_DISPATCHER_CLASS_NAME);
             Object securityDispatcher = container.lookup(SECURITY_DISPATCHER_CLASS_NAME, "maven");
             Method decrypt = securityDispatcherClass.getMethod("decrypt", String.class);
             return ((String) decrypt.invoke(securityDispatcher, password)).replace("$", "\\$");
@@ -122,9 +122,8 @@ public class ServersExtension extends AbstractMavenLifecycleParticipant implemen
     }
 
     private String[] getAliases(String serverId, String field) {
-        return new String[]{
-            "settings.servers." + serverId + "." + field,
-            "settings.servers.server." + serverId + "." + field, // legacy syntax, left for backward compatibility
+        return new String[] { "settings.servers." + serverId + "." + field,
+                "settings.servers.server." + serverId + "." + field, // legacy syntax, left for backward compatibility
         };
     }
 

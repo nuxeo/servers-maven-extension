@@ -16,19 +16,27 @@
 package com.github.shyiko.sme;
 
 import java.lang.reflect.Method;
+import java.util.Base64;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Properties;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import javax.inject.Inject;
+
 import org.apache.maven.AbstractMavenLifecycleParticipant;
 import org.apache.maven.MavenExecutionException;
+import org.apache.maven.artifact.repository.ArtifactRepository;
+import org.apache.maven.bridge.MavenRepositorySystem;
 import org.apache.maven.execution.MavenSession;
+import org.apache.maven.model.Repository;
 import org.apache.maven.plugin.MojoExecution;
 import org.apache.maven.plugin.PluginParameterExpressionEvaluator;
 import org.apache.maven.plugin.descriptor.MojoDescriptor;
 import org.apache.maven.project.MavenProject;
+import org.apache.maven.repository.MirrorSelector;
+import org.apache.maven.settings.Mirror;
 import org.apache.maven.settings.Server;
 import org.codehaus.plexus.PlexusConstants;
 import org.codehaus.plexus.PlexusContainer;
@@ -44,57 +52,107 @@ import org.codehaus.plexus.personality.plexus.lifecycle.phase.Contextualizable;
 @Component(role = AbstractMavenLifecycleParticipant.class)
 public class ServersExtension extends AbstractMavenLifecycleParticipant implements Contextualizable {
 
+    private static final String REPOSITORIES = "repositories";
+
+    private static final String SERVERS = "servers";
+
     private static final String SECURITY_DISPATCHER_CLASS_NAME = "org.sonatype.plexus.components.sec.dispatcher.SecDispatcher";
 
-    private static final String[] FIELDS = new String[] { "username", "password", "passphrase", "privateKey",
-            "filePermissions", "directoryPermissions" };
+    private static final Map<String, String[]> FIELDS = new HashMap<>();
+    {
+        FIELDS.put(SERVERS, new String[] { "username", "password", "passphrase", "privateKey", "filePermissions",
+                "directoryPermissions" });
+        FIELDS.put(REPOSITORIES, new String[] { "url" });
+    }
 
     private PlexusContainer container;
+
+    @Inject
+    MirrorSelector mirrors;
 
     public void contextualize(final Context context) throws ContextException {
         container = (PlexusContainer) context.get(PlexusConstants.PLEXUS_KEY);
     }
 
-    @Override
     public void afterProjectsRead(MavenSession session) throws MavenExecutionException {
         MojoExecution mojoExecution = new MojoExecution(new MojoDescriptor());
         ExpressionEvaluator expressionEvaluator = new PluginParameterExpressionEvaluator(session, mojoExecution);
         Properties userProperties = session.getUserProperties();
         Map<String, String> properties = new HashMap<String, String>();
         try {
-            for (Server server : session.getSettings().getServers()) {
-                String serverId = server.getId();
-                for (String field : FIELDS) {
-                    String[] aliases = getAliases(serverId, field);
-                    String fieldNameWithFirstLetterCapitalized = upperCaseFirstLetter(field);
-                    String fieldValue = (String) Server.class.getMethod("get" + fieldNameWithFirstLetterCapitalized)
-                                                             .invoke(server);
-                    if (fieldValue != null) {
-                        fieldValue = decryptInlinePasswords(fieldValue);
-                    }
-                    for (String alias : aliases) {
-                        String userPropertyValue = userProperties.getProperty(alias);
-                        if (userPropertyValue != null) {
-                            fieldValue = userPropertyValue;
-                            break;
-                        }
-                    }
-                    String resolvedValue = (String) expressionEvaluator.evaluate(fieldValue);
-                    Server.class.getMethod("set" + fieldNameWithFirstLetterCapitalized, new Class[] { String.class })
-                                .invoke(server, resolvedValue);
-                    if (resolvedValue != null) {
-                        for (String alias : aliases) {
-                            properties.put(alias, resolvedValue);
-                        }
-                    }
-                }
-            }
-            for (MavenProject project : session.getProjects()) {
-                project.getProperties().putAll(properties);
-            }
+            collectRepositories(session, expressionEvaluator, userProperties, properties);
+            collectServers(session, expressionEvaluator, userProperties, properties);
         } catch (Exception e) {
             throw new MavenExecutionException("Failed to expose settings.servers.*", e);
         }
+        for (MavenProject project : session.getProjects()) {
+            project.getProperties().putAll(properties);
+        }
+    }
+
+    private void collectRepositories(MavenSession session, ExpressionEvaluator expressionEvaluator,
+            Properties userProperties, Map<String, String> properties) throws Exception {
+        MavenProject project = session.getCurrentProject();
+        for (Repository repository : project.getRepositories()) {
+            final String id = repository.getId();
+            final String prefix = String.format("project.%s.%s.", REPOSITORIES, id);
+
+            // retrieve repository info
+            for (String name : FIELDS.get(REPOSITORIES)) {
+                properties.put(prefix + name,
+                        (String) Repository.class.getMethod("get" + upperCaseFirstLetter(name)).invoke(repository));
+            }
+
+            // override with mirror URL if any
+            final ArtifactRepository artifacts = MavenRepositorySystem.buildArtifactRepository(repository);
+            final Mirror mirror = mirrors.getMirror(artifacts, session.getSettings().getMirrors());
+            if (mirror != null) {
+                properties.put(prefix + "url", mirror.getUrl());
+            }
+        }
+    }
+
+    private void collectServers(MavenSession session, ExpressionEvaluator expressionEvaluator,
+            Properties userProperties, Map<String, String> properties) throws Exception {
+        for (Server server : session.getSettings().getServers()) {
+            String serverId = server.getId();
+            for (String field : FIELDS.get(SERVERS)) {
+                String[] aliases = getServerAliases(serverId, field);
+                String fieldNameWithFirstLetterCapitalized = upperCaseFirstLetter(field);
+                String fieldValue = (String) Server.class.getMethod("get" + fieldNameWithFirstLetterCapitalized)
+                                                         .invoke(server);
+                if (fieldValue != null) {
+                    fieldValue = decryptInlinePasswords(fieldValue);
+                }
+                for (String alias : aliases) {
+                    String userPropertyValue = userProperties.getProperty(alias);
+                    if (userPropertyValue != null) {
+                        fieldValue = userPropertyValue;
+                        break;
+                    }
+                }
+                String resolvedValue = (String) expressionEvaluator.evaluate(fieldValue);
+                Server.class.getMethod("set" + fieldNameWithFirstLetterCapitalized, new Class[] { String.class })
+                            .invoke(server, resolvedValue);
+                if (resolvedValue != null) {
+                    for (String alias : aliases) {
+                        properties.put(alias, resolvedValue);
+                    }
+                }
+            }
+            String authValue = encodeBasicAuth(serverId, properties);
+            for (String alias : getServerAliases(serverId, "auth")) {
+                properties.put(alias, authValue);
+            }
+        }
+
+    }
+
+    private String encodeBasicAuth(String serverId, Map<String, String> props) {
+        String value = String.format("%s:%s", props.getOrDefault("settings.servers." + serverId + ".username", ""),
+                props.getOrDefault("settings.servers." + serverId + ".password", ""));
+
+        return Base64.getEncoder().encodeToString(value.getBytes());
     }
 
     private String decryptInlinePasswords(String v) {
@@ -121,9 +179,13 @@ public class ServersExtension extends AbstractMavenLifecycleParticipant implemen
         return password;
     }
 
-    private String[] getAliases(String serverId, String field) {
-        return new String[] { "settings.servers." + serverId + "." + field,
-                "settings.servers.server." + serverId + "." + field, // legacy syntax, left for backward compatibility
+    private String[] getServerAliases(String id, String field) {
+        return new String[] { "settings.servers." + id + "." + field, "settings.servers.server." + id + "." + field, // legacy
+                                                                                                                     // syntax,
+                                                                                                                     // left
+                                                                                                                     // for
+                                                                                                                     // backward
+                                                                                                                     // compatibility
         };
     }
 
